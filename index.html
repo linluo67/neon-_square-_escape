@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>霓虹方块大逃亡 (Neon Square Escape)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background-color: #0a0a0a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+        
+        #gameCanvas {
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    
+    <script>
+        /**
+         * ============================================
+         * 霓虹方块大逃亡 (Neon Square Escape)
+         * ============================================
+         * 
+         * 核心游戏开发特征：
+         * 1. 游戏循环 - 使用 requestAnimationFrame + Delta Time
+         * 2. 碰撞检测 - AABB (轴对齐包围盒) 算法
+         * 3. 有限状态机 - MENU / PLAYING / GAME_OVER 状态流转
+         * 4. 渲染系统 - Canvas API 绘制霓虹效果
+         * ============================================
+         */
+
+        // ============================================
+        // 游戏常量配置
+        // ============================================
+        const CANVAS_WIDTH = 800;
+        const CANVAS_HEIGHT = 600;
+        const PLAYER_SIZE = 30;
+        const PLAYER_SPEED = 300; // 像素/秒
+        const PLAYER_COLOR = '#00ffff';
+        const ENEMY_SIZE = 25;
+        const ENEMY_SPEED = 120; // 像素/秒
+        const ENEMY_COLOR = '#ff0040';
+        const ENEMY_SPAWN_INTERVAL = 2000; // 毫秒
+        const BACKGROUND_COLOR = '#0a0a0a';
+        const GRID_COLOR = '#1a1a2e';
+
+        // ============================================
+        // 有限状态机 - 游戏状态枚举
+        // ============================================
+        const GameState = {
+            MENU: 'MENU',           // 主菜单状态
+            PLAYING: 'PLAYING',     // 游戏进行中状态
+            GAME_OVER: 'GAME_OVER'  // 游戏结束状态
+        };
+
+        // ============================================
+        // 输入处理器类 - 处理键盘事件
+        // ============================================
+        class InputHandler {
+            constructor() {
+                // 存储按键状态的对象
+                this.keys = {};
+                // 标记空格键是否刚刚被按下（用于防止连续触发）
+                this.spacePressed = false;
+                
+                // 绑定键盘事件
+                window.addEventListener('keydown', (e) => {
+                    this.keys[e.code] = true;
+                    
+                    // 检测空格键按下事件
+                    if (e.code === 'Space' && !this.spacePressed) {
+                        this.spacePressed = true;
+                        // 触发游戏状态切换
+                        if (window.game) {
+                            window.game.handleSpacePress();
+                        }
+                    }
+                });
+                
+                window.addEventListener('keyup', (e) => {
+                    this.keys[e.code] = false;
+                    
+                    // 空格键释放时重置标记
+                    if (e.code === 'Space') {
+                        this.spacePressed = false;
+                    }
+                });
+            }
+            
+            /**
+             * 检查特定按键是否被按下
+             * @param {string} code - 按键代码 (如 'ArrowUp', 'KeyW')
+             * @returns {boolean} 按键是否被按下
+             */
+            isPressed(code) {
+                return !!this.keys[code];
+            }
+            
+            /**
+             * 获取玩家移动方向向量
+             * 支持箭头键和WASD两种控制方式
+             * @returns {{x: number, y: number}} 归一化的方向向量
+             */
+            getMovementDirection() {
+                let dx = 0;
+                let dy = 0;
+                
+                // 上方向 (箭头键 或 W)
+                if (this.isPressed('ArrowUp') || this.isPressed('KeyW')) dy -= 1;
+                // 下方向 (箭头键 或 S)
+                if (this.isPressed('ArrowDown') || this.isPressed('KeyS')) dy += 1;
+                // 左方向 (箭头键 或 A)
+                if (this.isPressed('ArrowLeft') || this.isPressed('KeyA')) dx -= 1;
+                // 右方向 (箭头键 或 D)
+                if (this.isPressed('ArrowRight') || this.isPressed('KeyD')) dx += 1;
+                
+                // 归一化对角线移动（防止斜向移动速度过快）
+                if (dx !== 0 && dy !== 0) {
+                    const length = Math.sqrt(dx * dx + dy * dy);
+                    dx /= length;
+                    dy /= length;
+                }
+                
+                return { x: dx, y: dy };
+            }
+        }
+
+        // ============================================
+        // 实体基类 - 玩家和敌人的共同基类
+        // ============================================
+        class Entity {
+            constructor(x, y, size, color) {
+                this.x = x;           // X坐标
+                this.y = y;           // Y坐标
+                this.size = size;     // 实体尺寸
+                this.color = color;   // 实体颜色
+                this.vx = 0;          // X方向速度
+                this.vy = 0;          // Y方向速度
+            }
+            
+            /**
+             * 更新实体位置
+             * @param {number} dt - 时间增量（秒）
+             */
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+            }
+            
+            /**
+             * 获取实体的包围盒（用于碰撞检测）
+             * @returns {{x: number, y: number, width: number, height: number}}
+             */
+            getBounds() {
+                return {
+                    x: this.x - this.size / 2,
+                    y: this.y - this.size / 2,
+                    width: this.size,
+                    height: this.size
+                };
+            }
+            
+            /**
+             * 绘制实体（子类可重写）
+             * @param {CanvasRenderingContext2D} ctx - Canvas 2D上下文
+             */
+            draw(ctx) {
+                // 基类不提供默认绘制，由子类实现
+            }
+        }
+
+        // ============================================
+        // 玩家类 - 继承自Entity
+        // ============================================
+        class Player extends Entity {
+            constructor(x, y) {
+                super(x, y, PLAYER_SIZE, PLAYER_COLOR);
+                this.speed = PLAYER_SPEED;
+            }
+            
+            /**
+             * 更新玩家位置并限制在画布范围内
+             * @param {number} dt - 时间增量
+             * @param {InputHandler} input - 输入处理器
+             */
+            update(dt, input) {
+                // 获取移动方向
+                const direction = input.getMovementDirection();
+                
+                // 设置速度
+                this.vx = direction.x * this.speed;
+                this.vy = direction.y * this.speed;
+                
+                // 调用父类更新位置
+                super.update(dt);
+                
+                // 限制玩家在画布边界内
+                const halfSize = this.size / 2;
+                this.x = Math.max(halfSize, Math.min(CANVAS_WIDTH - halfSize, this.x));
+                this.y = Math.max(halfSize, Math.min(CANVAS_HEIGHT - halfSize, this.y));
+            }
+            
+            /**
+             * 绘制玩家（带霓虹发光效果）
+             * @param {CanvasRenderingContext2D} ctx
+             */
+            draw(ctx) {
+                ctx.save();
+                
+                // 增强霓虹发光效果 - 多层光晕
+                ctx.shadowBlur = 30;
+                ctx.shadowColor = this.color;
+                
+                // 绘制发光方块
+                ctx.fillStyle = this.color;
+                ctx.fillRect(
+                    this.x - this.size / 2,
+                    this.y - this.size / 2,
+                    this.size,
+                    this.size
+                );
+                
+                ctx.restore();
+            }
+        }
+
+        // ============================================
+        // 敌人类 - 继承自Entity
+        // ============================================
+        class Enemy extends Entity {
+            constructor(x, y) {
+                super(x, y, ENEMY_SIZE, ENEMY_COLOR);
+                this.speed = ENEMY_SPEED;
+            }
+            
+            /**
+             * 更新敌人位置（追踪玩家）
+             * @param {number} dt - 时间增量
+             * @param {Player} player - 玩家对象
+             */
+            update(dt, player) {
+                // 计算指向玩家的方向向量
+                const dx = player.x - this.x;
+                const dy = player.y - this.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                // 归一化并设置速度
+                if (distance > 0) {
+                    this.vx = (dx / distance) * this.speed;
+                    this.vy = (dy / distance) * this.speed;
+                }
+                
+                // 调用父类更新位置
+                super.update(dt);
+            }
+            
+            /**
+             * 绘制敌人（带霓虹发光效果）
+             * @param {CanvasRenderingContext2D} ctx
+             */
+            draw(ctx) {
+                ctx.save();
+                
+                // 增强霓虹发光效果 - 多层光晕
+                ctx.shadowBlur = 25;
+                ctx.shadowColor = this.color;
+                
+                // 绘制发光方块
+                ctx.fillStyle = this.color;
+                ctx.fillRect(
+                    this.x - this.size / 2,
+                    this.y - this.size / 2,
+                    this.size,
+                    this.size
+                );
+                
+                ctx.restore();
+            }
+        }
+
+        // ============================================
+        // 渲染系统 - 封装所有绘图操作
+        // ============================================
+        class Renderer {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+            }
+            
+            /**
+             * 清空画布
+             */
+            clear() {
+                this.ctx.fillStyle = BACKGROUND_COLOR;
+                this.ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            }
+            
+            /**
+             * 绘制背景网格
+             */
+            drawGrid() {
+                this.ctx.strokeStyle = GRID_COLOR;
+                this.ctx.lineWidth = 1;
+                
+                const gridSize = 50;
+                
+                // 绘制垂直线
+                for (let x = 0; x <= CANVAS_WIDTH; x += gridSize) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(x, 0);
+                    this.ctx.lineTo(x, CANVAS_HEIGHT);
+                    this.ctx.stroke();
+                }
+                
+                // 绘制水平线
+                for (let y = 0; y <= CANVAS_HEIGHT; y += gridSize) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(0, y);
+                    this.ctx.lineTo(CANVAS_WIDTH, y);
+                    this.ctx.stroke();
+                }
+            }
+            
+            /**
+             * 绘制发光文本
+             * @param {string} text - 文本内容
+             * @param {number} x - X坐标
+             * @param {number} y - Y坐标
+             * @param {string} color - 颜色
+             * @param {number} size - 字体大小
+             * @param {string} align - 对齐方式
+             */
+            drawGlowingText(text, x, y, color, size = 30, align = 'center') {
+                this.ctx.save();
+                
+                // 设置发光效果
+                this.ctx.shadowBlur = 20;
+                this.ctx.shadowColor = color;
+                
+                // 设置字体
+                this.ctx.font = `bold ${size}px 'Courier New', monospace`;
+                this.ctx.fillStyle = color;
+                this.ctx.textAlign = align;
+                this.ctx.textBaseline = 'middle';
+                
+                // 绘制文本
+                this.ctx.fillText(text, x, y);
+                
+                this.ctx.restore();
+            }
+            
+            /**
+             * 绘制分数
+             * @param {number} score - 当前分数
+             */
+            drawScore(score) {
+                this.drawGlowingText(
+                    `分数: ${Math.floor(score)}`,
+                    CANVAS_WIDTH / 2,
+                    40,
+                    '#ffffff',
+                    24
+                );
+            }
+            
+            /**
+             * 绘制主菜单界面
+             */
+            drawMenu() {
+                // 绘制标题
+                this.drawGlowingText(
+                    '霓虹方块大逃亡',
+                    CANVAS_WIDTH / 2,
+                    CANVAS_HEIGHT / 2 - 50,
+                    '#00ffff',
+                    48
+                );
+                
+                // 绘制副标题
+                this.drawGlowingText(
+                    'NEON SQUARE ESCAPE',
+                    CANVAS_WIDTH / 2,
+                    CANVAS_HEIGHT / 2,
+                    '#ff0040',
+                    24
+                );
+                
+                // 绘制提示文字（带闪烁效果）
+                const blink = Math.sin(Date.now() / 300) > 0;
+                if (blink) {
+                    this.drawGlowingText(
+                        '按空格键开始游戏',
+                        CANVAS_WIDTH / 2,
+                        CANVAS_HEIGHT / 2 + 80,
+                        '#ffffff',
+                        20
+                    );
+                }
+                
+                // 绘制操作说明
+                this.drawGlowingText(
+                    '使用 ↑↓←→ 或 WASD 移动',
+                    CANVAS_WIDTH / 2,
+                    CANVAS_HEIGHT / 2 + 140,
+                    '#888888',
+                    16
+                );
+            }
+            
+            /**
+             * 绘制游戏结束界面
+             * @param {number} finalScore - 最终分数
+             */
+            drawGameOver(finalScore) {
+                // 绘制半透明遮罩
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                this.ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                
+                // 绘制游戏结束标题
+                this.drawGlowingText(
+                    '游戏结束',
+                    CANVAS_WIDTH / 2,
+                    CANVAS_HEIGHT / 2 - 60,
+                    '#ff0040',
+                    48
+                );
+                
+                // 绘制最终分数
+                this.drawGlowingText(
+                    `最终得分: ${Math.floor(finalScore)}`,
+                    CANVAS_WIDTH / 2,
+                    CANVAS_HEIGHT / 2,
+                    '#00ffff',
+                    32
+                );
+                
+                // 绘制重试提示（带闪烁效果）
+                const blink = Math.sin(Date.now() / 300) > 0;
+                if (blink) {
+                    this.drawGlowingText(
+                        '按空格键重试',
+                        CANVAS_WIDTH / 2,
+                        CANVAS_HEIGHT / 2 + 80,
+                        '#ffffff',
+                        20
+                    );
+                }
+            }
+        }
+
+        // ============================================
+        // 游戏主类 - 管理全局状态和游戏循环
+        // ============================================
+        class Game {
+            constructor(canvas) {
+                // 初始化渲染系统
+                this.renderer = new Renderer(canvas);
+                
+                // 初始化输入处理器
+                this.input = new InputHandler();
+                
+                // 初始化游戏状态（默认为菜单状态）
+                this.state = GameState.MENU;
+                
+                // 游戏对象
+                this.player = null;
+                this.enemies = [];
+                
+                // 游戏数据
+                this.score = 0;
+                this.lastEnemySpawnTime = 0;
+                
+                // 游戏循环相关
+                this.lastTime = 0;
+                this.animationId = null;
+                
+                // 将游戏实例绑定到全局，供输入处理器访问
+                window.game = this;
+            }
+            
+            /**
+             * 处理空格键按下事件（状态机切换逻辑）
+             * 这是有限状态机的核心状态流转实现
+             */
+            handleSpacePress() {
+                switch (this.state) {
+                    case GameState.MENU:
+                        // 从菜单状态切换到游戏状态
+                        this.startGame();
+                        break;
+                    case GameState.GAME_OVER:
+                        // 从游戏结束状态切换到游戏状态（重新开始）
+                        this.startGame();
+                        break;
+                    case GameState.PLAYING:
+                        // 游戏进行中，空格键无特殊功能
+                        break;
+                }
+            }
+            
+            /**
+             * 开始新游戏
+             */
+            startGame() {
+                // 重置游戏状态
+                this.state = GameState.PLAYING;
+                this.score = 0;
+                this.enemies = [];
+                this.lastEnemySpawnTime = 0;
+                
+                // 创建玩家（初始位置在画布中央）
+                this.player = new Player(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+            }
+            
+            /**
+             * 游戏结束
+             */
+            gameOver() {
+                // 切换到游戏结束状态
+                this.state = GameState.GAME_OVER;
+            }
+            
+            /**
+             * 生成新敌人
+             * 敌人在屏幕边缘随机位置生成
+             */
+            spawnEnemy() {
+                let x, y;
+                const side = Math.floor(Math.random() * 4); // 0:上, 1:右, 2:下, 3:左
+                
+                switch (side) {
+                    case 0: // 上边
+                        x = Math.random() * CANVAS_WIDTH;
+                        y = -ENEMY_SIZE;
+                        break;
+                    case 1: // 右边
+                        x = CANVAS_WIDTH + ENEMY_SIZE;
+                        y = Math.random() * CANVAS_HEIGHT;
+                        break;
+                    case 2: // 下边
+                        x = Math.random() * CANVAS_WIDTH;
+                        y = CANVAS_HEIGHT + ENEMY_SIZE;
+                        break;
+                    case 3: // 左边
+                        x = -ENEMY_SIZE;
+                        y = Math.random() * CANVAS_HEIGHT;
+                        break;
+                }
+                
+                this.enemies.push(new Enemy(x, y));
+            }
+            
+            /**
+             * AABB (轴对齐包围盒) 碰撞检测算法
+             * 检测两个矩形是否发生碰撞
+             * 
+             * 原理：
+             * 两个轴对齐的矩形相交，当且仅当：
+             * - 矩形A的左边 < 矩形B的右边
+             * - 矩形A的右边 > 矩形B的左边
+             * - 矩形A的上边 < 矩形B的下边
+             * - 矩形A的下边 > 矩形B的上边
+             * 
+             * @param {Entity} entityA - 实体A
+             * @param {Entity} entityB - 实体B
+             * @returns {boolean} 是否发生碰撞
+             */
+            checkCollision(entityA, entityB) {
+                const boundsA = entityA.getBounds();
+                const boundsB = entityB.getBounds();
+                
+                return (
+                    boundsA.x < boundsB.x + boundsB.width &&
+                    boundsA.x + boundsA.width > boundsB.x &&
+                    boundsA.y < boundsB.y + boundsB.height &&
+                    boundsA.y + boundsA.height > boundsB.y
+                );
+            }
+            
+            /**
+             * 更新游戏逻辑
+             * @param {number} dt - 时间增量（秒）
+             */
+            update(dt) {
+                // 只有在游戏进行中状态才更新逻辑
+                if (this.state !== GameState.PLAYING) {
+                    return;
+                }
+                
+                // 更新分数（每秒增加10分）
+                this.score += dt * 10;
+                
+                // 更新玩家位置
+                this.player.update(dt, this.input);
+                
+                // 更新所有敌人位置
+                for (const enemy of this.enemies) {
+                    enemy.update(dt, this.player);
+                }
+                
+                // 检测玩家与敌人的碰撞
+                for (const enemy of this.enemies) {
+                    if (this.checkCollision(this.player, enemy)) {
+                        // 发生碰撞，触发游戏结束
+                        this.gameOver();
+                        return;
+                    }
+                }
+                
+                // 定时生成新敌人
+                this.lastEnemySpawnTime += dt * 1000; // 转换为毫秒
+                if (this.lastEnemySpawnTime >= ENEMY_SPAWN_INTERVAL) {
+                    this.spawnEnemy();
+                    this.lastEnemySpawnTime = 0;
+                }
+            }
+            
+            /**
+             * 绘制游戏画面
+             */
+            draw() {
+                // 清空画布
+                this.renderer.clear();
+                
+                // 绘制背景网格
+                this.renderer.drawGrid();
+                
+                // 根据当前状态绘制不同内容
+                switch (this.state) {
+                    case GameState.MENU:
+                        // 绘制主菜单
+                        this.renderer.drawMenu();
+                        break;
+                        
+                    case GameState.PLAYING:
+                        // 绘制玩家
+                        if (this.player) {
+                            this.player.draw(this.renderer.ctx);
+                        }
+                        
+                        // 绘制所有敌人
+                        for (const enemy of this.enemies) {
+                            enemy.draw(this.renderer.ctx);
+                        }
+                        
+                        // 绘制分数
+                        this.renderer.drawScore(this.score);
+                        break;
+                        
+                    case GameState.GAME_OVER:
+                        // 先绘制游戏画面（作为背景）
+                        if (this.player) {
+                            this.player.draw(this.renderer.ctx);
+                        }
+                        for (const enemy of this.enemies) {
+                            enemy.draw(this.renderer.ctx);
+                        }
+                        this.renderer.drawScore(this.score);
+                        
+                        // 再绘制游戏结束界面
+                        this.renderer.drawGameOver(this.score);
+                        break;
+                }
+            }
+            
+            /**
+             * 游戏循环 - 使用 requestAnimationFrame 驱动
+             * @param {number} currentTime - 当前时间戳
+             */
+            gameLoop(currentTime) {
+                // 计算时间增量（Delta Time）
+                // 首次运行时没有上一帧时间，使用默认值
+                if (this.lastTime === 0) {
+                    this.lastTime = currentTime;
+                }
+                
+                // 计算与上一帧的时间差，并转换为秒
+                const dt = (currentTime - this.lastTime) / 1000;
+                this.lastTime = currentTime;
+                
+                // 限制最大时间增量（防止切换标签页后dt过大导致的问题）
+                const clampedDt = Math.min(dt, 0.1);
+                
+                // 更新游戏逻辑
+                this.update(clampedDt);
+                
+                // 绘制游戏画面
+                this.draw();
+                
+                // 请求下一帧
+                this.animationId = requestAnimationFrame((time) => this.gameLoop(time));
+            }
+            
+            /**
+             * 启动游戏
+             */
+            start() {
+                // 开始游戏循环
+                this.animationId = requestAnimationFrame((time) => this.gameLoop(time));
+            }
+        }
+
+        // ============================================
+        // 页面加载完成后初始化游戏
+        // ============================================
+        window.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const game = new Game(canvas);
+            game.start();
+        });
+    </script>
+</body>
+</html>
