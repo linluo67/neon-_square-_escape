@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>霓虹方块大逃亡 | Neon Square Escape</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #0a0a0f;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        
+        #gameCanvas {
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.3),
+                        inset 0 0 30px rgba(0, 255, 255, 0.1);
+            background: #0d0d1a;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script>
+        // 游戏状态枚举
+        const GameState = {
+            MENU: 'MENU',
+            PLAYING: 'PLAYING',
+            GAME_OVER: 'GAME_OVER'
+        };
+
+        // ==================== 输入处理类 ====================
+        class InputHandler {
+            constructor() {
+                this.keys = {};
+                this.init();
+            }
+
+            init() {
+                window.addEventListener('keydown', (e) => {
+                    this.keys[e.code] = true;
+                    if (e.code === 'Space') {
+                        e.preventDefault();
+                    }
+                });
+
+                window.addEventListener('keyup', (e) => {
+                    this.keys[e.code] = false;
+                });
+            }
+
+            isKeyPressed(keyCode) {
+                return this.keys[keyCode] === true;
+            }
+
+            getMovementVector() {
+                let dx = 0;
+                let dy = 0;
+
+                // 支持箭头键和WASD
+                if (this.isKeyPressed('ArrowUp') || this.isKeyPressed('KeyW')) dy = -1;
+                if (this.isKeyPressed('ArrowDown') || this.isKeyPressed('KeyS')) dy = 1;
+                if (this.isKeyPressed('ArrowLeft') || this.isKeyPressed('KeyA')) dx = -1;
+                if (this.isKeyPressed('ArrowRight') || this.isKeyPressed('KeyD')) dx = 1;
+
+                // 归一化对角移动
+                if (dx !== 0 && dy !== 0) {
+                    const length = Math.sqrt(dx * dx + dy * dy);
+                    dx /= length;
+                    dy /= length;
+                }
+
+                return { dx, dy };
+            }
+        }
+
+        // ==================== 实体基类 ====================
+        class Entity {
+            constructor(x, y, size, color, glowColor) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.color = color;
+                this.glowColor = glowColor;
+                this.speed = 0;
+            }
+
+            // AABB碰撞检测算法
+            static checkCollision(entityA, entityB) {
+                return entityA.x < entityB.x + entityB.size &&
+                       entityA.x + entityA.size > entityB.x &&
+                       entityA.y < entityB.y + entityB.size &&
+                       entityA.y + entityA.size > entityB.y;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = this.glowColor;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.restore();
+            }
+        }
+
+        // ==================== 玩家类 ====================
+        class Player extends Entity {
+            constructor(x, y) {
+                super(x, y, 30, '#00ffff', '#00ffff');
+                this.speed = 280; // 像素/秒
+            }
+
+            update(dt, movement, canvasWidth, canvasHeight) {
+                this.x += movement.dx * this.speed * dt;
+                this.y += movement.dy * this.speed * dt;
+
+                // 边界检测
+                this.x = Math.max(0, Math.min(canvasWidth - this.size, this.x));
+                this.y = Math.max(0, Math.min(canvasHeight - this.size, this.y));
+            }
+        }
+
+        // ==================== 敌人类 ====================
+        class Enemy extends Entity {
+            constructor(x, y) {
+                super(x, y, 25, '#ff3366', '#ff3366');
+                this.speed = 100 + Math.random() * 50; // 随机速度
+            }
+
+            update(dt, playerX, playerY) {
+                // 计算朝向玩家的方向向量
+                const dx = playerX - this.x;
+                const dy = playerY - this.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                if (distance > 0) {
+                    this.x += (dx / distance) * this.speed * dt;
+                    this.y += (dy / distance) * this.speed * dt;
+                }
+            }
+        }
+
+        // ==================== 渲染系统 ====================
+        class Renderer {
+            constructor(canvas) {
+                this.ctx = canvas.getContext('2d');
+                this.width = canvas.width;
+                this.height = canvas.height;
+            }
+
+            clear() {
+                this.ctx.fillStyle = '#0d0d1a';
+                this.ctx.fillRect(0, 0, this.width, this.height);
+                
+                // 绘制网格背景
+                this.ctx.strokeStyle = 'rgba(0, 255, 255, 0.05)';
+                this.ctx.lineWidth = 1;
+                for (let i = 0; i < this.width; i += 40) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(i, 0);
+                    this.ctx.lineTo(i, this.height);
+                    this.ctx.stroke();
+                }
+                for (let i = 0; i < this.height; i += 40) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(0, i);
+                    this.ctx.lineTo(this.width, i);
+                    this.ctx.stroke();
+                }
+            }
+
+            drawEntity(entity) {
+                entity.draw(this.ctx);
+            }
+
+            drawText(text, x, y, size, color, align = 'center') {
+                this.ctx.save();
+                this.ctx.shadowBlur = 10;
+                this.ctx.shadowColor = color;
+                this.ctx.fillStyle = color;
+                this.ctx.font = `bold ${size}px 'Segoe UI', sans-serif`;
+                this.ctx.textAlign = align;
+                this.ctx.fillText(text, x, y);
+                this.ctx.restore();
+            }
+
+            drawGlowText(text, x, y, size, color, glowIntensity = 20) {
+                this.ctx.save();
+                this.ctx.shadowBlur = glowIntensity;
+                this.ctx.shadowColor = color;
+                this.ctx.fillStyle = color;
+                this.ctx.font = `bold ${size}px 'Segoe UI', sans-serif`;
+                this.ctx.textAlign = 'center';
+                this.ctx.fillText(text, x, y);
+                this.ctx.restore();
+            }
+        }
+
+        // ==================== 游戏主类 ====================
+        class Game {
+            constructor() {
+                this.canvas = document.getElementById('gameCanvas');
+                this.renderer = new Renderer(this.canvas);
+                this.input = new InputHandler();
+                
+                // 游戏状态管理 - 有限状态机
+                this.state = GameState.MENU;
+                
+                // 游戏对象
+                this.player = null;
+                this.enemies = [];
+                
+                // 游戏数据
+                this.score = 0;
+                this.survivalTime = 0; // 存活时间（秒）
+                this.enemySpawnTimer = 0;
+                this.enemySpawnInterval = 2000; // 毫秒
+                this.spacePressed = false;
+                
+                // 游戏循环相关
+                this.lastTime = 0;
+                this.animationId = null;
+                
+                this.init();
+            }
+
+            init() {
+                this.startLoop();
+            }
+
+            // ==================== 游戏循环系统 ====================
+            startLoop() {
+                this.lastTime = performance.now();
+                this.loop(this.lastTime);
+            }
+
+            loop(currentTime) {
+                // 计算时间增量 (Delta Time)
+                const dt = Math.min((currentTime - this.lastTime) / 1000, 0.1);
+                this.lastTime = currentTime;
+
+                // 状态驱动的更新与渲染
+                this.update(dt);
+                this.draw();
+
+                this.animationId = requestAnimationFrame((time) => this.loop(time));
+            }
+
+            // 逻辑更新入口
+            update(dt) {
+                this.handleStateInput();
+
+                switch (this.state) {
+                    case GameState.PLAYING:
+                        this.updatePlaying(dt);
+                        break;
+                    // MENU 和 GAME_OVER 状态不需要游戏逻辑更新
+                }
+            }
+
+            // 状态切换输入处理
+            handleStateInput() {
+                const spaceJustPressed = this.input.isKeyPressed('Space');
+                
+                if (spaceJustPressed && !this.spacePressed) {
+                    switch (this.state) {
+                        case GameState.MENU:
+                            this.startGame();
+                            break;
+                        case GameState.GAME_OVER:
+                            this.resetGame();
+                            break;
+                    }
+                }
+                
+                this.spacePressed = spaceJustPressed;
+            }
+
+            // 游戏进行中更新逻辑
+            updatePlaying(dt) {
+                // 获取玩家输入并移动
+                const movement = this.input.getMovementVector();
+                this.player.update(dt, movement, this.canvas.width, this.canvas.height);
+
+                // 更新所有敌人
+                for (const enemy of this.enemies) {
+                    enemy.update(dt, this.player.x + this.player.size / 2, 
+                                  this.player.y + this.player.size / 2);
+                }
+
+                // ==================== 碰撞检测 ====================
+                for (const enemy of this.enemies) {
+                    if (Entity.checkCollision(this.player, enemy)) {
+                        this.gameOver();
+                        return; // 碰撞后立即停止更新
+                    }
+                }
+
+                // 更新存活时间
+                this.survivalTime += dt;
+                
+                // 优化分数机制：
+                // - 基础分：每秒5分（更平缓的基础增长）
+                // - 存活时间加成：每多存活10秒，每秒增加1分（鼓励存活更久）
+                // - 敌人数量加成：每个敌人每秒增加2分（鼓励在高难度下生存）
+                const baseScorePerSecond = 5;
+                const survivalBonus = Math.floor(this.survivalTime / 10) * 1;
+                const enemyBonusPerSecond = this.enemies.length * 2;
+                const totalScorePerSecond = baseScorePerSecond + survivalBonus + enemyBonusPerSecond;
+                
+                this.score += totalScorePerSecond * dt;
+
+                // 敌人生成
+                this.enemySpawnTimer += dt * 1000;
+                if (this.enemySpawnTimer >= this.enemySpawnInterval) {
+                    this.spawnEnemy();
+                    this.enemySpawnTimer = 0;
+                    // 逐渐加快敌人生成速度
+                    this.enemySpawnInterval = Math.max(800, this.enemySpawnInterval - 50);
+                }
+            }
+
+            // 渲染入口
+            draw() {
+                this.renderer.clear();
+
+                switch (this.state) {
+                    case GameState.MENU:
+                        this.drawMenu();
+                        break;
+                    case GameState.PLAYING:
+                        this.drawPlaying();
+                        break;
+                    case GameState.GAME_OVER:
+                        this.drawGameOver();
+                        break;
+                }
+            }
+
+            // ==================== 状态切换方法 ====================
+            startGame() {
+                this.state = GameState.PLAYING;
+                this.player = new Player(
+                    this.canvas.width / 2 - 15,
+                    this.canvas.height / 2 - 15
+                );
+                this.enemies = [];
+                this.score = 0;
+                this.survivalTime = 0;
+                this.enemySpawnTimer = 0;
+                this.enemySpawnInterval = 2000;
+            }
+
+            resetGame() {
+                this.startGame();
+            }
+
+            gameOver() {
+                this.state = GameState.GAME_OVER;
+            }
+
+            // 生成敌人（在屏幕边缘随机位置）
+            spawnEnemy() {
+                const side = Math.floor(Math.random() * 4);
+                let x, y;
+
+                switch (side) {
+                    case 0: // 上边
+                        x = Math.random() * this.canvas.width;
+                        y = -30;
+                        break;
+                    case 1: // 右边
+                        x = this.canvas.width + 30;
+                        y = Math.random() * this.canvas.height;
+                        break;
+                    case 2: // 下边
+                        x = Math.random() * this.canvas.width;
+                        y = this.canvas.height + 30;
+                        break;
+                    case 3: // 左边
+                        x = -30;
+                        y = Math.random() * this.canvas.height;
+                        break;
+                }
+
+                this.enemies.push(new Enemy(x, y));
+            }
+
+            // ==================== 各状态渲染方法 ====================
+            drawMenu() {
+                const centerX = this.canvas.width / 2;
+                const centerY = this.canvas.height / 2;
+
+                // 标题
+                this.renderer.drawGlowText(
+                    '霓虹方块大逃亡',
+                    centerX,
+                    centerY - 80,
+                    48,
+                    '#00ffff',
+                    30
+                );
+
+                this.renderer.drawGlowText(
+                    'NEON SQUARE ESCAPE',
+                    centerX,
+                    centerY - 30,
+                    24,
+                    '#ff00ff',
+                    20
+                );
+
+                // 开始提示
+                this.renderer.drawText(
+                    '按 空格键 开始游戏',
+                    centerX,
+                    centerY + 60,
+                    20,
+                    '#ffffff'
+                );
+
+                // 操作说明
+                this.renderer.drawText(
+                    '使用 方向键 或 WASD 移动',
+                    centerX,
+                    centerY + 120,
+                    16,
+                    '#888888'
+                );
+
+                // 绘制示例方块
+                this.renderer.ctx.save();
+                this.renderer.ctx.shadowBlur = 15;
+                this.renderer.ctx.shadowColor = '#00ffff';
+                this.renderer.ctx.fillStyle = '#00ffff';
+                this.renderer.ctx.fillRect(centerX - 100, centerY + 160, 20, 20);
+                this.renderer.ctx.restore();
+
+                this.renderer.drawText(
+                    '← 你',
+                    centerX - 60,
+                    centerY + 176,
+                    14,
+                    '#00ffff'
+                );
+
+                this.renderer.ctx.save();
+                this.renderer.ctx.shadowBlur = 15;
+                this.renderer.ctx.shadowColor = '#ff3366';
+                this.renderer.ctx.fillStyle = '#ff3366';
+                this.renderer.ctx.fillRect(centerX + 30, centerY + 160, 20, 20);
+                this.renderer.ctx.restore();
+
+                this.renderer.drawText(
+                    '← 敌人',
+                    centerX + 70,
+                    centerY + 176,
+                    14,
+                    '#ff3366'
+                );
+            }
+
+            drawPlaying() {
+                // 绘制玩家
+                this.renderer.drawEntity(this.player);
+
+                // 绘制所有敌人
+                for (const enemy of this.enemies) {
+                    this.renderer.drawEntity(enemy);
+                }
+
+                // 绘制分数
+                this.renderer.drawText(
+                    `分数: ${Math.floor(this.score)}`,
+                    20,
+                    35,
+                    24,
+                    '#00ffff',
+                    'left'
+                );
+
+                // 绘制存活时间
+                this.renderer.drawText(
+                    `存活: ${Math.floor(this.survivalTime)}秒`,
+                    20,
+                    65,
+                    16,
+                    '#ffff00',
+                    'left'
+                );
+
+                // 绘制敌人数量
+                this.renderer.drawText(
+                    `敌人: ${this.enemies.length}`,
+                    20,
+                    90,
+                    16,
+                    '#ff3366',
+                    'left'
+                );
+            }
+
+            drawGameOver() {
+                const centerX = this.canvas.width / 2;
+                const centerY = this.canvas.height / 2;
+
+                // 先绘制游戏结束前的状态（玩家和敌人）作为背景
+                if (this.player) {
+                    this.renderer.drawEntity(this.player);
+                }
+                for (const enemy of this.enemies) {
+                    this.renderer.drawEntity(enemy);
+                }
+
+                // 半透明遮罩
+                this.renderer.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                this.renderer.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // 游戏结束标题
+                this.renderer.drawGlowText(
+                    '游戏结束',
+                    centerX,
+                    centerY - 60,
+                    56,
+                    '#ff3366',
+                    30
+                );
+
+                // 最终得分
+                this.renderer.drawText(
+                    '最终得分',
+                    centerX,
+                    centerY + 20,
+                    24,
+                    '#ffffff'
+                );
+
+                this.renderer.drawGlowText(
+                    `${Math.floor(this.score)}`,
+                    centerX,
+                    centerY + 70,
+                    48,
+                    '#ffff00',
+                    25
+                );
+
+                // 重试提示
+                this.renderer.drawText(
+                    '按 空格键 重新开始',
+                    centerX,
+                    centerY + 130,
+                    20,
+                    '#ffffff'
+                );
+            }
+        }
+
+        // 页面加载完成后初始化游戏
+        window.addEventListener('load', () => {
+            new Game();
+        });
+    </script>
+</body>
+</html>
